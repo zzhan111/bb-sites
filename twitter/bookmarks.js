@@ -39,7 +39,8 @@ async function(args) {
     longform_notetweets_rich_text_read_enabled: true, longform_notetweets_inline_media_enabled: false,
     responsive_web_enhance_cards_enabled: false
   });
-  const url = '/i/api/graphql/Fy0QMy4q_aZCpkO0PnyLYw/Bookmarks?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);
+  const queryId = findGraphQLQueryId('Bookmarks', 'Fy0QMy4q_aZCpkO0PnyLYw');
+  const url = '/i/api/graphql/' + queryId + '/Bookmarks?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);
   const resp = await fetch(url, {headers: _h, credentials: 'include'});
   if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'queryId may have changed. Check network tab on x.com/i/bookmarks.'};
   const d = await resp.json();

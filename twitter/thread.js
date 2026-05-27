@@ -31,6 +31,7 @@ async function(args) {
     longform_notetweets_inline_media_enabled: true, freedom_of_speech_not_reach_fetch_enabled: true
   });
   const fieldToggles = JSON.stringify({withArticleRichContentState: true, withArticlePlainText: false});
+  const tweetDetailQueryId = findGraphQLQueryId('TweetDetail', 'nBS-WpgA6ZG0CyNHD517JQ');
 
   let tweets = [], seen = new Set(), cursor = null, maxPages = 5;
 
@@ -56,7 +57,7 @@ async function(args) {
     };
     if (cursor) vars.cursor = cursor;
 
-    const url = '/i/api/graphql/nBS-WpgA6ZG0CyNHD517JQ/TweetDetail?variables=' + encodeURIComponent(JSON.stringify(vars)) + '&features=' + encodeURIComponent(features) + '&fieldToggles=' + encodeURIComponent(fieldToggles);
+    const url = '/i/api/graphql/' + tweetDetailQueryId + '/TweetDetail?variables=' + encodeURIComponent(JSON.stringify(vars)) + '&features=' + encodeURIComponent(features) + '&fieldToggles=' + encodeURIComponent(fieldToggles);
     const resp = await fetch(url, {headers: _h, credentials: 'include'});
     if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'Tweet may not exist or queryId expired'};
     const d = await resp.json();

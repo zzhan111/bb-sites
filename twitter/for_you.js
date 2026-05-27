@@ -18,6 +18,29 @@ async function(args) {
   const bearer = decodeURIComponent('AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA');
   const _h = {'Authorization':'Bearer '+bearer, 'X-Csrf-Token':ct0, 'X-Twitter-Auth-Type':'OAuth2Session', 'X-Twitter-Active-User':'yes'};
 
+  function findGraphQLQueryId(operationName, fallbackQueryId) {
+    try {
+      let __webpack_require__;
+      window.webpackChunk_twitter_responsive_web.push([['__bb_q_' + Date.now()], {}, (req) => { __webpack_require__ = req; }]);
+      const op = operationName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const patterns = [
+        new RegExp('queryId:\\s*"([^"]+)"\\s*,\\s*operationName:\\s*"' + op + '"'),
+        new RegExp('operationName:\\s*"' + op + '"\\s*,\\s*queryId:\\s*"([^"]+)"')
+      ];
+      for (const id of Object.keys(__webpack_require__.m)) {
+        try {
+          const src = __webpack_require__.m[id].toString();
+          if (!src.includes(operationName)) continue;
+          for (const pattern of patterns) {
+            const m = src.match(pattern);
+            if (m) return m[1];
+          }
+        } catch {}
+      }
+    } catch {}
+    return fallbackQueryId;
+  }
+
   const count = Math.min(parseInt(args.count) || 20, 50);
   const variables = JSON.stringify({
     count,
@@ -46,7 +69,8 @@ async function(args) {
     responsive_web_enhance_cards_enabled: false
   });
 
-  const url = '/i/api/graphql/HJFjzBgCs16TqxewQOeLNg/HomeTimeline?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);
+  const queryId = findGraphQLQueryId('HomeTimeline', 'HJFjzBgCs16TqxewQOeLNg');
+  const url = '/i/api/graphql/' + queryId + '/HomeTimeline?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);
   const resp = await fetch(url, {headers: _h, credentials: 'include'});
   if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'queryId may have changed'};
   const d = await resp.json();

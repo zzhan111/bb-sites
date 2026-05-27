@@ -25,15 +25,15 @@ async function(args) {
     verified_phone_label_enabled: false, responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
     responsive_web_graphql_timeline_navigation_enabled: true
   });
-  const url = '/i/api/graphql/pLsOiyHJ1eFwPJlNmLp4Bg/UserByScreenName?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);
+  const queryId = findGraphQLQueryId('UserByScreenName', 'pLsOiyHJ1eFwPJlNmLp4Bg');
+  const url = '/i/api/graphql/' + queryId + '/UserByScreenName?variables=' + encodeURIComponent(variables) + '&features=' + encodeURIComponent(features);
   const resp = await fetch(url, {headers: _h, credentials: 'include'});
   if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'queryId may have changed. Check network tab.'};
   const d = await resp.json();
   const u = d.data?.user?.result;
   if (!u) return {error: 'User not found', hint: 'Check spelling: @' + args.screen_name};
   const l = u.legacy || {};
-  const screenName = l.screen_name || u?.core?.screen_name || args.screen_name;
-  return {id: u.rest_id, name: l.name || u?.core?.name, screen_name: screenName, bio: l.description,
-    url: 'https://x.com/' + screenName,
+  return {id: u.rest_id, name: l.name, screen_name: l.screen_name, bio: l.description,
+    url: 'https://x.com/' + l.screen_name,
     followers: l.followers_count, following: l.friends_count, tweets: l.statuses_count, verified: u.is_blue_verified};
 }

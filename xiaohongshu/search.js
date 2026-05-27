@@ -155,7 +155,6 @@ async function(args) {
       const user = card.user || {};
       if (!noteId || !/^[a-f0-9]+$/i.test(String(noteId))) return null;
       return {
-        id: noteId,
         note_id: noteId,
         xsec_token: xsecToken,
         title: card.displayTitle ?? card.display_title ?? card.title ?? null,
@@ -166,7 +165,6 @@ async function(args) {
         author: user.nickname ?? user.nickName ?? null,
         author_id: user.userId ?? user.user_id ?? null,
         likes: card.interactInfo?.likedCount ?? card.interact_info?.liked_count ?? null,
-        cover: card.cover?.urlDefault ?? card.cover?.urlPre ?? card.cover?.url ?? card.imageList?.[0]?.urlDefault ?? null,
         time: card.lastUpdateTime ?? card.last_update_time ?? card.time ?? null
       };
     }
@@ -337,13 +335,18 @@ async function(args) {
     return origOpen.apply(this, arguments);
   };
 
+  const searchKeyword = args.keyword;
+
   XMLHttpRequest.prototype.send = function(body) {
     if (String(this.__bbUrl || "").includes("search/notes")) {
       const request = this;
       const orig = request.onreadystatechange;
       request.onreadystatechange = function() {
         if (request.readyState === 4 && !captured) {
-          try { captured = JSON.parse(request.responseText); } catch {}
+          try {
+            const parsed = JSON.parse(request.responseText);
+            if (parsed?.data?.items) captured = parsed;
+          } catch {}
         }
         if (orig) return orig.apply(this, arguments);
       };
@@ -356,7 +359,8 @@ async function(args) {
     try {
       const url = typeof resource === "string" ? resource : resource?.url;
       if (!captured && url && String(url).includes("search/notes")) {
-        captured = await response.clone().json();
+        const parsed = await response.clone().json();
+        if (parsed?.data?.items) captured = parsed;
       }
     } catch {}
     return response;
@@ -398,7 +402,7 @@ async function(args) {
       searchStore.searchContext.keyword = args.keyword;
       searchStore.searchContext.page = 1;
       searchStore.searchContext.pageSize = searchStore.searchContext.pageSize || 20;
-      searchStore.searchContext.searchId = searchStore.searchContext.searchId || searchStore.rootSearchId || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+      searchStore.searchContext.searchId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
       searchStore.searchContext.sort = requestedSort;
       searchStore.searchContext.noteType = searchStore.searchContext.noteType ?? 0;
       searchStore.searchContext.extFlags = Array.isArray(searchStore.searchContext.extFlags) ? searchStore.searchContext.extFlags : [];
@@ -412,6 +416,8 @@ async function(args) {
     searchStore.activeFilters = activeFilters;
 
     searchStore.resetSearchNoteStore?.();
+    if (searchStore.feeds) searchStore.feeds = [];
+    captured = null;
     try {
       if (searchStore.searchNotes) {
         searchStore.searchNotes();
@@ -436,7 +442,7 @@ async function(args) {
 
   const notes = (Array.isArray(rawItems) ? rawItems : [])
     .map(helper.mapNoteCardItem)
-    .filter((note) => note && /^[a-f0-9]+$/i.test(String(note.id)));
+    .filter((note) => note && /^[a-f0-9]+$/i.test(String(note.note_id)));
 
   if (captured && captured.success === false) {
     return {

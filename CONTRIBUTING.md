@@ -1,150 +1,73 @@
-# Contributing to bb-sites
+# 贡献适配器 — 合规 Checklist
 
-## Writing an Adapter
+提交适配器 PR 前,请完成以下 checklist(在 PR 描述中勾选):
 
-Each adapter is a single `.js` file in `<platform>/command.js`.
+## 必填 checklist(作者勾选)
 
-### Structure
+- [ ] 我已阅读目标站点的**服务条款(ToS)**,本适配器不违反其禁止性条款
+- [ ] 本适配器**不绕过** robots.txt / 验证码 / IP 限速 / 风控机制
+- [ ] 本适配器**不抓取**用户关系链 / 私信 / 其他用户 PII 用于再分发
+- [ ] 本适配器输出**不构成**对目标站点核心服务的"实质性替代"
+- [ ] 我已在适配器文件头部加 `@disclaimer` 声明
+- [ ] 我已在 `@meta` 中标注 `risk`(low/medium/high)与 `readOnly`(true/false)
+- [ ] 我理解:适配器由我**独立维护**,ma-browser 不为其行为背书
+
+## 适配器文件要求
+
+每个 `.js` 文件需含:
+
+1. **`@disclaimer` 头部注释**(文件最顶部):
+
+```javascript
+/**
+ * @disclaimer 本适配器由作者独立维护,ma-browser 不为适配器行为背书。
+ *             使用者需遵守 <目标站点> 服务条款,不得用于反爬/转售/商业化替代。
+ *             作者已阅读目标站点 ToS 并认为本适配器合规。
+ */
+```
+
+2. **`@meta` JSON 块**(disclaimer 之后):
 
 ```javascript
 /* @meta
 {
   "name": "platform/command",
-  "description": "What it does",
-  "domain": "example.com",
-  "args": {
-    "query": {"required": true, "description": "Search query"}
-  },
+  "title": "人类可读功能标题",
+  "description": "功能描述",
+  "category": "社交",
+  "risk": "high",
   "readOnly": true,
-  "example": "bb-browser site platform/command \"test\""
+  "prerequisites": "需先登录 platform.com",
+  "domain": "platform.com",
+  "args": { ... },
+  "example": "ma-browser site platform/command ..."
 }
 */
-async function(args) {
-  // Your code runs in the browser page context
-  // document, window, fetch with cookies — all available
-}
 ```
 
-### Tier Guide
+3. **适配器函数**(返回结果或 {error, hint})。
 
-| Tier | Auth | Example | Time |
-|------|------|---------|------|
-| 1 | Cookie only | Reddit, GitHub, V2EX | ~1 min |
-| 2 | Bearer + CSRF | Twitter/X | ~3 min |
-| 3 | Webpack/internal | XHS, Douyin | ~10 min |
+## 风险等级判定
 
-## Resilient Patterns
+| 等级 | 特征 | 例子 |
+|------|------|------|
+| 🟢 low | 公开数据、只读、不替代核心服务 | 商品搜索、车次查询、公开评分 |
+| 🟡 medium | 需登录、用户自己的数据、含写入 | 订单查询、加购、收藏 |
+| 🔴 high | 社交平台、实时数据、关系链、可能实质性替代 | 社交动态、关注列表、热榜聚合 |
 
-Websites change frequently. Use these patterns to make adapters survive updates.
+高危适配器(`risk: high`)会被面板标红,运行前要求用户二次确认遵守站点 ToS。
 
-### Pattern 1: Structural DOM Extraction (not CSS classes)
+## 目录结构
 
-CSS class names change often. Use semantic HTML elements instead.
-
-```javascript
-// ❌ Fragile: depends on CSS class
-const items = doc.querySelectorAll('div.g');
-
-// ✅ Resilient: semantic elements
-const h3s = doc.querySelectorAll('h3');
-for (const h3 of h3s) {
-  const a = h3.closest('a');
-  if (!a) continue;
-  const link = a.getAttribute('href');
-  if (!link || !link.startsWith('http')) continue;
-  const title = h3.textContent.trim();
-
-  // Walk up to find result container
-  let container = a;
-  while (container.parentElement && container.parentElement.tagName !== 'BODY') {
-    const sibs = [...container.parentElement.children];
-    if (sibs.filter(s => s.querySelector('h3')).length > 1) break;
-    container = container.parentElement;
-  }
-
-  // Find snippet outside the link block
-  const linkBlock = a.closest('div') || a;
-  let snippet = '';
-  for (const sp of container.querySelectorAll('span')) {
-    if (linkBlock.contains(sp)) continue;
-    const t = sp.textContent.trim();
-    if (t.length > 30 && t !== title) { snippet = t; break; }
-  }
-  results.push({ title, url: link, snippet });
-}
+```
+<platform>/
+  └── <command>.js      # name = "<platform>/<command>"
 ```
 
-### Pattern 2: Dynamic Webpack Module Discovery (not hardcoded IDs)
+## PR 流程
 
-SPA sites (Twitter/X, XHS, Douyin) bundle code with webpack. Module IDs change on every deploy.
-
-```javascript
-// Step 1: Get webpack require function
-let __webpack_require__;
-const chunkId = '__bb_' + Date.now();
-window.webpackChunk_twitter_responsive_web.push(
-  [[chunkId], {}, (req) => { __webpack_require__ = req; }]
-);
-
-// Step 2: Find module by source code signature (NOT by ID)
-let targetFn;
-for (const id of Object.keys(__webpack_require__.m)) {
-  const src = __webpack_require__.m[id].toString();
-  if (src.includes('some.stable.string') && src.includes('exportName:')) {
-    targetFn = __webpack_require__(id).exportName;
-    break;
-  }
-}
-
-// Step 3: Find GraphQL queryId by operationName
-let queryId;
-for (const id of Object.keys(__webpack_require__.m)) {
-  const src = __webpack_require__.m[id].toString();
-  const m = src.match(/queryId:"([^"]+)",operationName:"SearchTimeline"/);
-  if (m) { queryId = m[1]; break; }
-}
-```
-
-**Choosing signatures:**
-- Use **business strings** (domain names, API paths) not variable names
-- Combine **multiple features** (`includes('A') && includes('B')`)
-- For GraphQL: `operationName` is stable, `queryId` changes → use former to find latter
-
-### Pattern 3: Error Handling
-
-```javascript
-// Always validate args first
-if (!args.query) return {error: 'Missing argument: query'};
-
-// Check auth
-const csrf = document.cookie.match(/ct0=([^;]+)/)?.[1];
-if (!csrf) return {error: 'No CSRF token', hint: 'Please log in to x.com first.'};
-
-// Check dynamic discovery
-if (!queryId) return {
-  error: 'Cannot find queryId for SearchTimeline',
-  hint: 'Twitter GraphQL schema may have changed.'
-};
-
-// HTTP errors
-if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'API may have changed'};
-```
-
-Keywords `401`, `403`, `unauthorized`, `login`, `sign in` in error/hint trigger automatic login prompts.
-
-## Testing
-
-```bash
-# Save to local dir
-mkdir -p ~/.bb-browser/sites/myplatform
-cp myplatform/command.js ~/.bb-browser/sites/myplatform/
-
-# Test
-bb-browser site myplatform/command "test" --json
-```
-
-## Submitting
-
-1. Fork this repo
-2. Add your adapter file
-3. Open a PR with title: `feat(platform): add command-name adapter`
+1. Fork → 新建分支 `add-<platform>-<command>`
+2. 放入适配器文件(按平台分目录)
+3. 确认文件含 `@disclaimer` + 完整 `@meta`
+4. 提交 PR,描述里贴上面 checklist 的勾选结果
+5. 等待审核(高危适配器需人工复核)

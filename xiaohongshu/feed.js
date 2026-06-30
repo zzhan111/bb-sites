@@ -1,263 +1,229 @@
+/**
+ * @disclaimer 本适配器由作者独立维护,ma-browser 不为适配器行为背书。
+ *             使用者需遵守 小红书 服务条款,不得用于反爬/转售/商业化替代。
+ *             作者已阅读目标站点 ToS 并认为本适配器合规。
+ */
+/**
+ * xiaohongshu/feed — social-media P0 adapter (discover / read / list)
+ *
+ * Reads Xiaohongshu's home feed (algorithmic recommendation / hot / category /
+ * following). Strategy: navigate to the home page; XHS SPA populates
+ * `INITIAL_STATE.feed._value` (and per-source variants) with the feed array.
+ * Adapter reads from the SPA's already-fetched data instead of re-querying.
+ *
+ * `source` arg selects which sub-feed to read:
+ *   - "recommendation" — INITIAL_STATE.feed.feeds (default home feed)
+ *   - "hot"            — INITIAL_STATE.feed.hotFeeds (trending list)
+ *   - "category"       — INITIAL_STATE.feed.categoryFeeds (per-category)
+ *   - "following"      — INITIAL_STATE.feed.followingFeeds (your follows)
+ *
+ * Conforms to: docs/claude/contracts/social-media/v1.md §4
+ */
+
 /* @meta
 {
   "name": "xiaohongshu/feed",
-  "description": "Get Xiaohongshu home feed",
-  "domain": "www.xiaohongshu.com",
-  "args": {},
-  "capabilities": ["network"],
-  "readOnly": true
+  "title": "读取小红书首页推荐流",
+  "description": "Read Xiaohongshu's home feed. source arg: recommendation|hot|category|following. Reads from INITIAL_STATE.feed._value/<subKey> populated by XHS SPA.",
+  "domain": "social-media",
+  "category": "社交",
+  "risk": "high",
+  "readOnly": true,
+  "prerequisites": "需先登录 xiaohongshu.com",
+  "args": [
+    {
+      "name": "source",
+      "type": "enum",
+      "values": [
+        "recommendation",
+        "hot",
+        "category",
+        "following"
+      ],
+      "default": "recommendation"
+    },
+    {
+      "name": "category",
+      "type": "string",
+      "required": false,
+      "desc": "Category id (only for source=category). See adapter description for valid values."
+    }
+  ],
+  "example": "bb-browser site xiaohongshu/feed --source hot --json",
+  "capabilities": [
+    "read",
+    "list",
+    "network"
+  ],
+  "accessTier": "auth_read",
+  "intent": "discover"
 }
 */
 
-async function(args) {
-  const helper = globalThis.__bbBrowserXhsHelper?.rememberNoteTokens
-    ? globalThis.__bbBrowserXhsHelper
-    : (globalThis.__bbBrowserXhsHelper = (() => {
-    function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-    function getApp() { return document.querySelector("#app")?.__vue_app__ || null; }
-    function getGlobals() { return getApp()?.config?.globalProperties || null; }
-    function getPinia() { return getGlobals()?.$pinia || null; }
-    function getRouter() { return getGlobals()?.$router || null; }
-    function getStore(name) { return getPinia()?._s?.get(name) || null; }
-    function toPlain(value) { try { return JSON.parse(JSON.stringify(value)); } catch { return value ?? null; } }
-    async function waitFor(predicate, timeoutMs = 8000, intervalMs = 250) {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        try {
-          const result = await predicate();
-          if (result) return result;
-        } catch {}
-        await sleep(intervalMs);
-      }
-      return null;
-    }
-    function withTimeout(promise, timeoutMs, message) {
-      return Promise.race([
-        promise,
-        sleep(timeoutMs).then(() => { throw new Error(message); })
-      ]);
-    }
-    function normalizeUser(user) {
-      if (!user || typeof user !== "object") return null;
-      const nickname = user.nickname ?? user.name ?? user.nickName ?? null;
-      const userId = user.userId ?? user.user_id ?? user.userid ?? user.id ?? null;
-      const redId = user.redId ?? user.red_id ?? user.redid ?? null;
-      const desc = user.desc ?? user.description ?? null;
-      const gender = user.gender ?? null;
-      if (!nickname && !userId && !redId) return null;
-      return {
-        nickname,
-        red_id: redId,
-        desc,
-        gender,
-        userid: userId,
-        url: userId ? `https://www.xiaohongshu.com/user/profile/${userId}` : null
-      };
-    }
-    function mapNoteCardItem(item) {
-      const card = item?.noteCard || item?.note_card || item;
-      if (!card || typeof card !== "object") return null;
-      const noteId = item?.id ?? card.noteId ?? card.note_id ?? null;
-      const xsecToken = item?.xsecToken ?? item?.xsec_token ?? card.xsecToken ?? card.xsec_token ?? null;
-      const user = card.user || {};
-      if (!noteId || !/^[a-f0-9]+$/i.test(String(noteId))) return null;
-      return {
-        id: noteId,
-        note_id: noteId,
-        xsec_token: xsecToken,
-        title: card.displayTitle ?? card.display_title ?? card.title ?? null,
-        type: card.type ?? null,
-        url: xsecToken
-          ? `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=`
-          : `https://www.xiaohongshu.com/explore/${noteId}`,
-        author: user.nickname ?? user.nickName ?? null,
-        author_id: user.userId ?? user.user_id ?? null,
-        likes: card.interactInfo?.likedCount ?? card.interact_info?.liked_count ?? null,
-        cover: card.cover?.urlDefault ?? card.cover?.urlPre ?? card.cover?.url ?? card.imageList?.[0]?.urlDefault ?? null,
-        time: card.lastUpdateTime ?? card.last_update_time ?? card.time ?? null
-      };
-    }
-    function flattenNoteGroups(groups) {
-      const result = [];
-      if (!Array.isArray(groups)) return result;
-      for (const group of groups) {
-        if (Array.isArray(group)) result.push(...group);
-        else if (group) result.push(group);
-      }
-      return result;
-    }
-    function parseInitialState(html) {
-      const match = html.match(/__INITIAL_STATE__=(\{[\s\S]*?\})<\/script>/);
-      if (!match) throw new Error("SSR state not found");
-      return (0, eval)("(" + match[1] + ")");
-    }
-    async function fetchHtml(url) {
-      const response = await fetch(url, { credentials: "include" });
-      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-      return await response.text();
-    }
-    function parseNoteInput(input) {
-      const raw = String(input ?? "").trim();
-      let noteId = raw;
-      let xsecToken = null;
-      if (!raw) return { noteId: "", xsecToken: null };
-      try {
-        const url = new URL(raw, location.origin);
-        const match = url.pathname.match(/\/(?:explore|search_result)\/([a-z0-9]+)/i);
-        if (match) noteId = match[1];
-        xsecToken = url.searchParams.get("xsec_token");
-      } catch {}
-      const idMatch = raw.match(/(?:explore|search_result)\/([a-z0-9]+)/i);
-      if (idMatch) noteId = idMatch[1];
-      const tokenMatch = raw.match(/[?&]xsec_token=([^&#]+)/i);
-      if (!xsecToken && tokenMatch) {
-        try { xsecToken = decodeURIComponent(tokenMatch[1]); } catch { xsecToken = tokenMatch[1]; }
-      }
-      return { noteId, xsecToken };
-    }
-    function buildNoteUrl(noteId, xsecToken) {
-      return `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=`;
-    }
-    function getTokenCache() {
-      if (!globalThis.__bbBrowserXhsTokenCache) globalThis.__bbBrowserXhsTokenCache = {};
-      return globalThis.__bbBrowserXhsTokenCache;
-    }
-    function rememberNoteTokens(items) {
-      const cache = getTokenCache();
-      if (!Array.isArray(items)) return cache;
-      for (const item of items) {
-        const mapped = mapNoteCardItem(item);
-        if (mapped?.id && mapped.xsec_token) cache[mapped.id] = mapped.xsec_token;
-      }
-      return cache;
-    }
-    function findTokenInCollection(items, noteId) {
-      if (!Array.isArray(items)) return null;
-      for (const item of items) {
-        const mapped = mapNoteCardItem(item);
-        if (mapped?.id === noteId && mapped.xsec_token) return mapped.xsec_token;
-      }
-      return null;
-    }
-    function resolveNoteToken(noteId) {
-      if (!noteId) return null;
-      const cached = getTokenCache()[noteId];
-      if (cached) return cached;
-      const detail = getStore("note")?.noteDetailMap?.[noteId];
-      const direct = detail?.note?.xsecToken ?? detail?.note?.xsec_token ?? null;
-      if (direct) return direct;
-      const searchToken = findTokenInCollection(getStore("search")?.feeds, noteId);
-      if (searchToken) return searchToken;
-      const feedToken = findTokenInCollection(getStore("feed")?.feeds, noteId);
-      if (feedToken) return feedToken;
-      const userToken = findTokenInCollection(flattenNoteGroups(getStore("user")?.notes), noteId);
-      if (userToken) return userToken;
-      const anchors = document.querySelectorAll(`a[href*="${noteId}"]`);
-      for (const anchor of anchors) {
-        const parsed = parseNoteInput(anchor.href || anchor.getAttribute("href") || "");
-        if (parsed.noteId === noteId && parsed.xsecToken) return parsed.xsecToken;
-      }
-      return null;
-    }
-    function resolveNoteIdentity(input) {
-      const parsed = parseNoteInput(input);
-      const xsecToken = parsed.xsecToken || resolveNoteToken(parsed.noteId);
-      return {
-        noteId: parsed.noteId,
-        xsecToken,
-        url: parsed.noteId && xsecToken ? buildNoteUrl(parsed.noteId, xsecToken) : null
-      };
-    }
-    async function navigate(path, query, waitMs = 1500) {
-      const router = getRouter();
-      if (!router) throw new Error("Router not found");
-      router.push({ path, query }).catch(() => {});
-      await sleep(waitMs);
-      return router.currentRoute?.value || null;
-    }
-    async function openNoteAndWait(noteId, xsecToken, requireComments = false) {
-      if (!noteId || !xsecToken) throw new Error("Missing note id or xsec token");
-      const noteStore = getStore("note");
-      if (!noteStore) throw new Error("Note store not found");
-      await navigate(`/explore/${noteId}`, { xsec_token: xsecToken, xsec_source: "" }, 1800);
-      if (noteStore.setCurrentNoteId) noteStore.setCurrentNoteId(noteId);
-      if (noteStore.getNoteDetailByNoteId) {
-        try {
-          await withTimeout(noteStore.getNoteDetailByNoteId(noteId), 6000, "Note detail load timed out");
-        } catch {}
-      }
-      const detail = await waitFor(() => {
-        const current = noteStore.noteDetailMap?.[noteId];
-        if (!current?.note || current.note.noteId !== noteId) return null;
-        if (!requireComments) return toPlain(current);
-        const list = current.comments?.list;
-        if (Array.isArray(list) && (list.length > 0 || current.comments?.firstRequestFinish)) return toPlain(current);
-        return null;
-      }, requireComments ? 12000 : 8000, 250);
-      if (!detail) throw new Error(requireComments ? "Note comments not loaded" : "Note detail not loaded");
-      return detail;
-    }
-    return {
-      sleep,
-      getPinia,
-      getRouter,
-      getStore,
-      toPlain,
-      waitFor,
-      withTimeout,
-      normalizeUser,
-      mapNoteCardItem,
-      flattenNoteGroups,
-      parseInitialState,
-      fetchHtml,
-      parseNoteInput,
-      buildNoteUrl,
-      rememberNoteTokens,
-      resolveNoteIdentity,
-      openNoteAndWait,
-      navigate
-    };
-  })());
+const HOME_URL = 'https://www.xiaohongshu.com';
 
-  const pinia = helper.getPinia();
-  const userStore = helper.getStore("user");
-  if (!userStore?.loggedIn) return { error: "Not logged in", hint: "Run: bb-browser open https://www.xiaohongshu.com/explore — then log in manually" };
-  if (!pinia?._s) {
-    return { error: "Page not ready", hint: "Ensure xiaohongshu.com is fully loaded" };
+const noteContextCache = new Map();
+const CACHE_TTL_MS = 30 * 60 * 1000;
+
+function cacheNoteContext(note) {
+  if (note && note.id && note.xsecToken) {
+    noteContextCache.set(note.id, {
+      xsecToken: note.xsecToken,
+      source: 'pc_feed',
+      fetchedAt: Date.now(),
+    });
   }
-
-  const feedStore = helper.getStore("feed");
-  if (!feedStore) {
-    return { error: "Feed store not found", hint: "Ensure xiaohongshu.com is fully loaded" };
-  }
-
-  let feeds = helper.toPlain(feedStore.feeds || []);
-  if (!Array.isArray(feeds) || feeds.length === 0) {
-    try {
-      await helper.navigate("/explore", undefined, 1800);
-    } catch {}
-    try {
-      if (feedStore.fetchFeeds) {
-        await helper.withTimeout(feedStore.fetchFeeds(), 6000, "Feed load timed out");
-        await helper.sleep(500);
-      }
-    } catch {}
-    feeds = helper.toPlain(feedStore.feeds || []);
-  }
-
-  const notes = (Array.isArray(feeds) ? feeds : [])
-    .map(helper.mapNoteCardItem)
-    .filter(Boolean);
-
-  helper.rememberNoteTokens(feeds);
-
-  if (notes.length === 0) {
-    return {
-      error: "Feed data unavailable",
-      hint: "Open or refresh the Xiaohongshu home feed, then retry"
-    };
-  }
-
-  const hasMore = Boolean(feedStore?.query?.cursorScore ?? feedStore?.query?.cursor_score ?? notes.length);
-  return { count: notes.length, has_more: hasMore, notes };
 }
+
+// Map XHS feed item -> contract Note (same shape as search.js mapXhsFeedItem).
+function mapXhsFeedItem(item) {
+  if (!item) return null;
+  const nc = item.noteCard || {};
+  const user = nc.user || {};
+  const interact = nc.interactInfo || {};
+  const authorNick = user.nickName || user.nickname || '';
+  const authorId = user.userId || '';
+  return {
+    id: item.id || '',
+    url: `${HOME_URL}/explore/${item.id || ''}?xsec_token=${item.xsecToken || ''}`,
+    type: nc.type === 'video' ? 'video' : 'image',
+    title: nc.displayTitle || nc.title || '',
+    desc: '',
+    author: {
+      id: authorId,
+      nickname: authorNick,
+      url: authorId ? `${HOME_URL}/user/profile/${authorId}` : '',
+    },
+    tags: [],
+    topics: [],
+    stats: {
+      likes: parseInt(interact.likedCount || '0', 10) || 0,
+      likesLabel: String(interact.likedCount || '0'),
+      collections: parseInt(interact.collectedCount || '0', 10) || 0,
+      comments: parseInt(interact.commentCount || '0', 10) || 0,
+      shares: parseInt(interact.sharedCount || '0', 10) || 0,
+    },
+    mediaCount: Array.isArray(nc.imageList) ? nc.imageList.length : (nc.cover ? 1 : 0),
+    publishedAt: null,
+    xsecToken: item.xsecToken || '',
+    scrapedAt: new Date().toISOString(),
+    _source: 'pc_feed',
+  };
+}
+
+async function feed(args) {
+  const { source = 'recommendation', category } = args || {};
+
+  // ----- 1. Navigate to the feed page -----
+  // Different sources use different URLs:
+  //   recommendation → /
+  //   hot            → /explore?channel=homefeed_recommend (or similar)
+  //   category       → /explore?categoryId=...
+  //   following      → /following or /explore?channel=...
+  const targetUrl = (() => {
+    switch (source) {
+      case 'hot': return `${HOME_URL}/explore?channel=homefeed_hot`;
+      case 'category': return `${HOME_URL}/explore?category_id=${encodeURIComponent(category || '')}`;
+      case 'following': return `${HOME_URL}/following`;
+      case 'recommendation':
+      default: return `${HOME_URL}/`;
+    }
+  })();
+
+  const page = await bb.goto(targetUrl, { waitUntil: 'networkidle' });
+
+  // ----- 2. Login check -----
+  const probe = await page.eval(async () => {
+    let cookies = [];
+    try { cookies = window.cookieStore ? await window.cookieStore.getAll() : []; } catch (_) {}
+    const a1 = cookies.find((c) => c.name === 'a1') || null;
+    const s = window.__INITIAL_STATE__;
+    const u = s && s.user;
+    const uiRef = u && u.userInfo;
+    const ui = uiRef ? (uiRef._value !== undefined ? uiRef._value : uiRef) : null;
+    return { a1Present: !!a1, userId: ui ? ui.userId : null };
+  });
+  if (!probe.userId) {
+    return {
+      ok: false,
+      authStatus: 'anonymous',
+      data: null,
+      error: 'LOGIN_REQUIRED',
+      hint: 'Feed needs a logged-in session.',
+      action: 'stop_and_wait_for_human',
+      recommendedNextActions: [{ adapter: 'auth', args: {}, why: 'Check login state.' }],
+    };
+  }
+
+  // ----- 3. Read feeds from INITIAL_STATE.feed -----
+  // Each source maps to a different key in `feed.*`. Try them in order, falling back.
+  const rawFeeds = await page.eval((src) => {
+    const s = window.__INITIAL_STATE__;
+    if (!s || !s.feed) return [];
+    const f = s.feed;
+    const keyMap = {
+      recommendation: ['feeds', 'recommendFeeds'],
+      hot: ['hotFeeds', 'feeds'],
+      category: ['categoryFeeds', 'feeds'],
+      following: ['followingFeeds', 'feeds'],
+    };
+    const candidates = keyMap[src] || ['feeds'];
+    for (const k of candidates) {
+      const v = f[k];
+      if (v == null) continue;
+      // Unwrap Vue ref if present.
+      const arr = v._value !== undefined ? v._value : v;
+      if (Array.isArray(arr) && arr.length) return arr;
+      if (typeof arr === 'object' && arr !== null) {
+        // Sometimes feed is nested by category — return first non-empty sub-array.
+        for (const sub of Object.values(arr)) {
+          const subArr = sub && sub._value !== undefined ? sub._value : sub;
+          if (Array.isArray(subArr) && subArr.length) return subArr;
+        }
+      }
+    }
+    return [];
+  }, source);
+
+  if (!rawFeeds.length) {
+    return {
+      ok: false,
+      authStatus: 'auth_read',
+      data: null,
+      error: 'NOT_FOUND',
+      hint: `Feed source '${source}' returned no items. Try another source.`,
+      action: 'abort',
+      recommendedNextActions: [{ adapter: 'feed', args: { source: 'recommendation' }, why: 'Default feed.' }],
+    };
+  }
+
+  const notes = rawFeeds.map(mapXhsFeedItem).filter(Boolean);
+  notes.forEach(cacheNoteContext);
+
+  const hasMore = notes.length >= 20;
+
+  return {
+    ok: true,
+    authStatus: 'auth_read',
+    data: notes,
+    constraints: {
+      requestedConstraints: { source, category: category || null },
+      executedConstraints:   { source, category: category || 'n/a' },
+      deferredConstraints:   {},
+    },
+    pagination: {
+      page: 1,
+      pageSize: notes.length,
+      hasMore,
+      cursor: '',
+      nextArgs: hasMore ? { source, category } : null,
+    },
+    recommendedNextActions: notes.slice(0, 3).map((n) => ({
+      adapter: 'post-detail',
+      args: { noteId: n.id, xsecToken: n.xsecToken },
+      why: `View full content of "${n.title || n.id}".`,
+    })),
+  };
+}
+
+const __cache_helpers = { cacheNoteContext };

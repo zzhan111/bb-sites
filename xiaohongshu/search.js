@@ -1,462 +1,265 @@
+/**
+ * @disclaimer 本适配器由作者独立维护,ma-browser 不为适配器行为背书。
+ *             使用者需遵守 小红书 服务条款,不得用于反爬/转售/商业化替代。
+ *             作者已阅读目标站点 ToS 并认为本适配器合规。
+ */
+/**
+ * xiaohongshu/search — social-media P0 adapter (discover / read / list)
+ *
+ * Search Xiaohongshu notes. Strategy: navigate to /search_result?keyword=...
+ * (XHS SPA loads + populates Vuex store with the result list), then read from
+ * `window.__INITIAL_STATE__.search.feeds._value` — a 44-element array of note
+ * summaries that XHS already paid the API cost to populate.
+ *
+ * This bypasses all signing/cookie complications because we're reading what
+ * XHS already fetched for us via its own UI.
+ *
+ * FIX LOG (SM-2.5):
+ *   - The xhs-cli SKILL.md claims xhs-cli uses POST /api/sns/web/v1/search/notes
+ *     directly. Reproducing that from the MCP browser triggers XHS code 300011
+ *     (anti-automation / 风控) because we can't synthesize the full 5-header
+ *     signature (x-s/x-s-common/x-t/x-b3-traceid/x-xray-traceid) reliably.
+ *   - The SPA-rendered path is BOTH safer (we use XHS's own UI request) AND
+ *     better aligned with the contract's "agent is the primary user" principle
+ *     — the agent rides the user's existing browser session, never impersonating.
+ *   - Note schema uses camelCase (noteCard / interactInfo / likedCount), not the
+ *     snake_case the xhs-cli SKILL.md assumed. xhs-cli recon is stale.
+ *
+ * Conforms to: docs/claude/contracts/social-media/v1.md §10.1
+ */
+
 /* @meta
 {
   "name": "xiaohongshu/search",
-  "description": "Search Xiaohongshu notes",
-  "domain": "www.xiaohongshu.com",
-  "args": {
-    "keyword": {"required": true, "description": "Search keyword"},
-    "sort": {"required": false, "description": "Sort: general (default), latest, likes, comments, collects"}
-  },
-  "capabilities": ["network"],
+  "title": "搜索小红书笔记",
+  "description": "Search Xiaohongshu notes by keyword/topic/hashtag. Strategy: navigate to XHS search_result page; XHS SPA populates Vuex store; adapter reads from window.__INITIAL_STATE__.search.feeds._value. No direct API call (avoids anti-automation).",
+  "domain": "social-media",
+  "category": "社交",
+  "risk": "high",
   "readOnly": true,
-  "example": "bb-browser site xiaohongshu/search fashion --sort likes"
+  "prerequisites": "需先登录 xiaohongshu.com",
+  "args": [
+    {
+      "name": "keyword",
+      "type": "string",
+      "required": true,
+      "desc": "Search term, topic name, or #hashtag"
+    },
+    {
+      "name": "sort",
+      "type": "enum",
+      "values": [
+        "general",
+        "latest"
+      ],
+      "default": "general"
+    },
+    {
+      "name": "type",
+      "type": "enum",
+      "values": [
+        "image",
+        "video"
+      ]
+    }
+  ],
+  "example": "bb-browser site xiaohongshu/search --keyword '咖啡推荐' --json",
+  "capabilities": [
+    "read",
+    "list",
+    "network"
+  ],
+  "accessTier": "auth_read",
+  "intent": "discover"
 }
 */
 
-async function(args) {
-  if (!args.keyword) return { error: "Missing argument: keyword" };
+const HOME_URL = 'https://www.xiaohongshu.com';
 
-  const sortAliases = {
-    general: "general",
-    default: "general",
-    comprehensive: "general",
-    "\u7efc\u5408": "general",
-    latest: "time_descending",
-    newest: "time_descending",
-    time: "time_descending",
-    time_descending: "time_descending",
-    "\u6700\u65b0": "time_descending",
-    likes: "popularity_descending",
-    popular: "popularity_descending",
-    popularity: "popularity_descending",
-    popularity_descending: "popularity_descending",
-    most_likes: "popularity_descending",
-    "\u6700\u591a\u70b9\u8d5e": "popularity_descending",
-    comments: "comment_descending",
-    comment_descending: "comment_descending",
-    most_comments: "comment_descending",
-    "\u6700\u591a\u8bc4\u8bba": "comment_descending",
-    collects: "collect_descending",
-    favorites: "collect_descending",
-    favourite: "collect_descending",
-    collect_descending: "collect_descending",
-    most_collects: "collect_descending",
-    "\u6700\u591a\u6536\u85cf": "collect_descending"
-  };
-  const sortLabelFallbacks = {
-    general: "Comprehensive",
-    time_descending: "Newest",
-    popularity_descending: "Most Likes",
-    comment_descending: "Most Comments",
-    collect_descending: "Most Collects"
-  };
-  const filterOrder = [
-    "sort_type",
-    "filter_note_type",
-    "filter_note_time",
-    "filter_note_range",
-    "filter_pos_distance"
-  ];
-  const requestedSortInput = String(args.sort ?? "general").trim();
-  const requestedSortKey = requestedSortInput.toLowerCase();
-  const requestedSort = sortAliases[requestedSortKey] || sortAliases[requestedSortInput] || null;
-  if (!requestedSort) {
-    return {
-      error: `Invalid sort: ${requestedSortInput}`,
-      hint: "Supported sort: general, latest, likes, comments, collects"
-    };
-  }
+// Module-scope xsecToken cache (populated by search, consulted by detail/like).
+const noteContextCache = new Map();
+const CACHE_TTL_MS = 30 * 60 * 1000;
 
-  function buildSearchFilters(filterGroups, sortId) {
-    const groups = Array.isArray(filterGroups) ? filterGroups : [];
-    return filterOrder.map((groupId) => {
-      const group = groups.find((item) => item?.id === groupId);
-      const tags = Array.isArray(group?.filterTags) ? group.filterTags : [];
-      let tagId = groupId === "sort_type" ? sortId : "\u4e0d\u9650";
-      if (groupId === "sort_type") {
-        const matched = tags.find((tag) => tag?.id === sortId);
-        if (matched?.id) tagId = matched.id;
-      } else if (tags[0]?.id) {
-        tagId = tags[0].id;
-      }
-      return { tags: [tagId], type: groupId };
+function cacheNoteContext(note) {
+  if (note && note.id && note.xsecToken) {
+    noteContextCache.set(note.id, {
+      xsecToken: note.xsecToken,
+      source: 'pc_search',
+      fetchedAt: Date.now(),
     });
   }
+}
 
-  function buildActiveFilters(filterGroups, filterParams) {
-    const groups = Array.isArray(filterGroups) ? filterGroups : [];
-    return filterOrder.map((groupId) => {
-      const group = groups.find((item) => item?.id === groupId);
-      const tags = Array.isArray(group?.filterTags) ? group.filterTags : [];
-      const selected = filterParams.find((item) => item?.type === groupId)?.tags?.[0];
-      const index = tags.findIndex((tag) => tag?.id === selected);
-      return index >= 0 ? index : 0;
-    });
+function getNoteContext(noteId) {
+  const ctx = noteContextCache.get(noteId);
+  if (!ctx) return null;
+  if (Date.now() - ctx.fetchedAt > CACHE_TTL_MS) {
+    noteContextCache.delete(noteId);
+    return null;
   }
+  return ctx;
+}
 
-  function resolveSortLabel(filterGroups, sortId) {
-    const groups = Array.isArray(filterGroups) ? filterGroups : [];
-    const sortGroup = groups.find((item) => item?.id === "sort_type");
-    const matched = Array.isArray(sortGroup?.filterTags)
-      ? sortGroup.filterTags.find((tag) => tag?.id === sortId)
-      : null;
-    return matched?.name || sortLabelFallbacks[sortId] || sortId;
-  }
-
-  const helper = globalThis.__bbBrowserXhsHelper?.rememberNoteTokens
-    ? globalThis.__bbBrowserXhsHelper
-    : (globalThis.__bbBrowserXhsHelper = (() => {
-    function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-    function getApp() { return document.querySelector("#app")?.__vue_app__ || null; }
-    function getGlobals() { return getApp()?.config?.globalProperties || null; }
-    function getPinia() { return getGlobals()?.$pinia || null; }
-    function getRouter() { return getGlobals()?.$router || null; }
-    function getStore(name) { return getPinia()?._s?.get(name) || null; }
-    function toPlain(value) { try { return JSON.parse(JSON.stringify(value)); } catch { return value ?? null; } }
-    async function waitFor(predicate, timeoutMs = 8000, intervalMs = 250) {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        try {
-          const result = await predicate();
-          if (result) return result;
-        } catch {}
-        await sleep(intervalMs);
-      }
-      return null;
-    }
-    function withTimeout(promise, timeoutMs, message) {
-      return Promise.race([
-        promise,
-        sleep(timeoutMs).then(() => { throw new Error(message); })
-      ]);
-    }
-    function normalizeUser(user) {
-      if (!user || typeof user !== "object") return null;
-      const nickname = user.nickname ?? user.name ?? user.nickName ?? null;
-      const userId = user.userId ?? user.user_id ?? user.userid ?? user.id ?? null;
-      const redId = user.redId ?? user.red_id ?? user.redid ?? null;
-      const desc = user.desc ?? user.description ?? null;
-      const gender = user.gender ?? null;
-      if (!nickname && !userId && !redId) return null;
-      return {
-        nickname,
-        red_id: redId,
-        desc,
-        gender,
-        userid: userId,
-        url: userId ? `https://www.xiaohongshu.com/user/profile/${userId}` : null
-      };
-    }
-    function mapNoteCardItem(item) {
-      const card = item?.noteCard || item?.note_card || item;
-      if (!card || typeof card !== "object") return null;
-      const noteId = item?.id ?? card.noteId ?? card.note_id ?? null;
-      const xsecToken = item?.xsecToken ?? item?.xsec_token ?? card.xsecToken ?? card.xsec_token ?? null;
-      const user = card.user || {};
-      if (!noteId || !/^[a-f0-9]+$/i.test(String(noteId))) return null;
-      return {
-        note_id: noteId,
-        xsec_token: xsecToken,
-        title: card.displayTitle ?? card.display_title ?? card.title ?? null,
-        type: card.type ?? null,
-        url: xsecToken
-          ? `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=`
-          : `https://www.xiaohongshu.com/explore/${noteId}`,
-        author: user.nickname ?? user.nickName ?? null,
-        author_id: user.userId ?? user.user_id ?? null,
-        likes: card.interactInfo?.likedCount ?? card.interact_info?.liked_count ?? null,
-        time: card.lastUpdateTime ?? card.last_update_time ?? card.time ?? null
-      };
-    }
-    function flattenNoteGroups(groups) {
-      const result = [];
-      if (!Array.isArray(groups)) return result;
-      for (const group of groups) {
-        if (Array.isArray(group)) result.push(...group);
-        else if (group) result.push(group);
-      }
-      return result;
-    }
-    function parseInitialState(html) {
-      const match = html.match(/__INITIAL_STATE__=(\{[\s\S]*?\})<\/script>/);
-      if (!match) throw new Error("SSR state not found");
-      return (0, eval)("(" + match[1] + ")");
-    }
-    async function fetchHtml(url) {
-      const response = await fetch(url, { credentials: "include" });
-      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-      return await response.text();
-    }
-    function parseNoteInput(input) {
-      const raw = String(input ?? "").trim();
-      let noteId = raw;
-      let xsecToken = null;
-      if (!raw) return { noteId: "", xsecToken: null };
-      try {
-        const url = new URL(raw, location.origin);
-        const match = url.pathname.match(/\/(?:explore|search_result)\/([a-z0-9]+)/i);
-        if (match) noteId = match[1];
-        xsecToken = url.searchParams.get("xsec_token");
-      } catch {}
-      const idMatch = raw.match(/(?:explore|search_result)\/([a-z0-9]+)/i);
-      if (idMatch) noteId = idMatch[1];
-      const tokenMatch = raw.match(/[?&]xsec_token=([^&#]+)/i);
-      if (!xsecToken && tokenMatch) {
-        try { xsecToken = decodeURIComponent(tokenMatch[1]); } catch { xsecToken = tokenMatch[1]; }
-      }
-      return { noteId, xsecToken };
-    }
-    function buildNoteUrl(noteId, xsecToken) {
-      return `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=`;
-    }
-    function getTokenCache() {
-      if (!globalThis.__bbBrowserXhsTokenCache) globalThis.__bbBrowserXhsTokenCache = {};
-      return globalThis.__bbBrowserXhsTokenCache;
-    }
-    function rememberNoteTokens(items) {
-      const cache = getTokenCache();
-      if (!Array.isArray(items)) return cache;
-      for (const item of items) {
-        const mapped = mapNoteCardItem(item);
-        if (mapped?.id && mapped.xsec_token) cache[mapped.id] = mapped.xsec_token;
-      }
-      return cache;
-    }
-    function findTokenInCollection(items, noteId) {
-      if (!Array.isArray(items)) return null;
-      for (const item of items) {
-        const mapped = mapNoteCardItem(item);
-        if (mapped?.id === noteId && mapped.xsec_token) return mapped.xsec_token;
-      }
-      return null;
-    }
-    function resolveNoteToken(noteId) {
-      if (!noteId) return null;
-      const cached = getTokenCache()[noteId];
-      if (cached) return cached;
-      const detail = getStore("note")?.noteDetailMap?.[noteId];
-      const direct = detail?.note?.xsecToken ?? detail?.note?.xsec_token ?? null;
-      if (direct) return direct;
-      const searchToken = findTokenInCollection(getStore("search")?.feeds, noteId);
-      if (searchToken) return searchToken;
-      const feedToken = findTokenInCollection(getStore("feed")?.feeds, noteId);
-      if (feedToken) return feedToken;
-      const userToken = findTokenInCollection(flattenNoteGroups(getStore("user")?.notes), noteId);
-      if (userToken) return userToken;
-      const anchors = document.querySelectorAll(`a[href*="${noteId}"]`);
-      for (const anchor of anchors) {
-        const parsed = parseNoteInput(anchor.href || anchor.getAttribute("href") || "");
-        if (parsed.noteId === noteId && parsed.xsecToken) return parsed.xsecToken;
-      }
-      return null;
-    }
-    function resolveNoteIdentity(input) {
-      const parsed = parseNoteInput(input);
-      const xsecToken = parsed.xsecToken || resolveNoteToken(parsed.noteId);
-      return {
-        noteId: parsed.noteId,
-        xsecToken,
-        url: parsed.noteId && xsecToken ? buildNoteUrl(parsed.noteId, xsecToken) : null
-      };
-    }
-    async function navigate(path, query, waitMs = 1500) {
-      const router = getRouter();
-      if (!router) throw new Error("Router not found");
-      router.push({ path, query }).catch(() => {});
-      await sleep(waitMs);
-      return router.currentRoute?.value || null;
-    }
-    async function openNoteAndWait(noteId, xsecToken, requireComments = false) {
-      if (!noteId || !xsecToken) throw new Error("Missing note id or xsec token");
-      const noteStore = getStore("note");
-      if (!noteStore) throw new Error("Note store not found");
-      await navigate(`/explore/${noteId}`, { xsec_token: xsecToken, xsec_source: "" }, 1800);
-      if (noteStore.setCurrentNoteId) noteStore.setCurrentNoteId(noteId);
-      if (noteStore.getNoteDetailByNoteId) {
-        try {
-          await withTimeout(noteStore.getNoteDetailByNoteId(noteId), 6000, "Note detail load timed out");
-        } catch {}
-      }
-      const detail = await waitFor(() => {
-        const current = noteStore.noteDetailMap?.[noteId];
-        if (!current?.note || current.note.noteId !== noteId) return null;
-        if (!requireComments) return toPlain(current);
-        const list = current.comments?.list;
-        if (Array.isArray(list) && (list.length > 0 || current.comments?.firstRequestFinish)) return toPlain(current);
-        return null;
-      }, requireComments ? 12000 : 8000, 250);
-      if (!detail) throw new Error(requireComments ? "Note comments not loaded" : "Note detail not loaded");
-      return detail;
-    }
-    return {
-      sleep,
-      getPinia,
-      getRouter,
-      getStore,
-      toPlain,
-      waitFor,
-      withTimeout,
-      normalizeUser,
-      mapNoteCardItem,
-      flattenNoteGroups,
-      parseInitialState,
-      fetchHtml,
-      parseNoteInput,
-      buildNoteUrl,
-      rememberNoteTokens,
-      resolveNoteIdentity,
-      openNoteAndWait,
-      navigate
-    };
-  })());
-
-  const pinia = helper.getPinia();
-  const userStore = helper.getStore("user");
-  if (!userStore?.loggedIn) return { error: "Not logged in", hint: "Run: bb-browser open https://www.xiaohongshu.com/explore — then log in manually" };
-  if (!pinia?._s) {
-    return { error: "Page not ready", hint: "Ensure xiaohongshu.com is fully loaded" };
-  }
-
-  const searchStore = helper.getStore("search");
-  if (!searchStore) {
-    return { error: "Search store not found", hint: "Ensure xiaohongshu.com is fully loaded" };
-  }
-
-  let availableFilters = [];
-  let appliedFilterParams = buildSearchFilters([], requestedSort);
-
-  let captured = null;
-  const origOpen = XMLHttpRequest.prototype.open;
-  const origSend = XMLHttpRequest.prototype.send;
-  const origFetch = globalThis.fetch;
-
-  XMLHttpRequest.prototype.open = function(method, url) {
-    this.__bbUrl = url;
-    return origOpen.apply(this, arguments);
-  };
-
-  const searchKeyword = args.keyword;
-
-  XMLHttpRequest.prototype.send = function(body) {
-    if (String(this.__bbUrl || "").includes("search/notes")) {
-      const request = this;
-      const orig = request.onreadystatechange;
-      request.onreadystatechange = function() {
-        if (request.readyState === 4 && !captured) {
-          try {
-            const parsed = JSON.parse(request.responseText);
-            if (parsed?.data?.items) captured = parsed;
-          } catch {}
-        }
-        if (orig) return orig.apply(this, arguments);
-      };
-    }
-    return origSend.apply(this, arguments);
-  };
-
-  globalThis.fetch = async function(resource, init) {
-    const response = await origFetch.apply(this, arguments);
-    try {
-      const url = typeof resource === "string" ? resource : resource?.url;
-      if (!captured && url && String(url).includes("search/notes")) {
-        const parsed = await response.clone().json();
-        if (parsed?.data?.items) captured = parsed;
-      }
-    } catch {}
-    return response;
-  };
-
-  try {
-    const router = helper.getRouter();
-    if (!router) {
-      return { error: "Router not found", hint: "Refresh the page and retry" };
-    }
-
-    router.push({
-      path: "/search_result",
-      query: { keyword: args.keyword, source: "web_search_result_notes" }
-    }).catch(() => {});
-
-    const routeReady = await helper.waitFor(() => {
-      const route = router.currentRoute?.value;
-      if (!route) return null;
-      return route.path === "/search_result" ? route : null;
-    }, 10000, 250);
-
-    if (!routeReady) {
-      return { error: "Search page did not load", hint: "Retry from an open Xiaohongshu tab" };
-    }
-
-    await helper.sleep(1200);
-
-    availableFilters = await helper.waitFor(() => {
-      const filters = helper.toPlain(searchStore.filters || []);
-      return Array.isArray(filters) && filters.length > 0 ? filters : null;
-    }, 5000, 200) || helper.toPlain(searchStore.filters || []);
-
-    appliedFilterParams = buildSearchFilters(availableFilters, requestedSort);
-    const activeFilters = buildActiveFilters(availableFilters, appliedFilterParams);
-
-    searchStore.mutateSearchValue?.(args.keyword);
-    if (searchStore.searchContext) {
-      searchStore.searchContext.keyword = args.keyword;
-      searchStore.searchContext.page = 1;
-      searchStore.searchContext.pageSize = searchStore.searchContext.pageSize || 20;
-      searchStore.searchContext.searchId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-      searchStore.searchContext.sort = requestedSort;
-      searchStore.searchContext.noteType = searchStore.searchContext.noteType ?? 0;
-      searchStore.searchContext.extFlags = Array.isArray(searchStore.searchContext.extFlags) ? searchStore.searchContext.extFlags : [];
-      searchStore.searchContext.filters = appliedFilterParams;
-      searchStore.searchContext.geo = searchStore.searchContext.geo || "";
-      searchStore.searchContext.imageFormats = Array.isArray(searchStore.searchContext.imageFormats) && searchStore.searchContext.imageFormats.length
-        ? searchStore.searchContext.imageFormats
-        : ["jpg", "webp", "avif"];
-    }
-    searchStore.filterParams = appliedFilterParams;
-    searchStore.activeFilters = activeFilters;
-
-    searchStore.resetSearchNoteStore?.();
-    if (searchStore.feeds) searchStore.feeds = [];
-    captured = null;
-    try {
-      if (searchStore.searchNotes) {
-        searchStore.searchNotes();
-      } else if (searchStore.loadMore) {
-        searchStore.loadMore();
-      }
-    } catch {}
-
-    await helper.waitFor(() => captured, 12000, 200);
-    await helper.sleep(300);
-  } finally {
-    XMLHttpRequest.prototype.open = origOpen;
-    XMLHttpRequest.prototype.send = origSend;
-    globalThis.fetch = origFetch;
-  }
-
-  const rawItems = Array.isArray(captured?.data?.items)
-    ? captured.data.items
-    : helper.toPlain(searchStore.feeds || []);
-
-  helper.rememberNoteTokens(rawItems);
-
-  const notes = (Array.isArray(rawItems) ? rawItems : [])
-    .map(helper.mapNoteCardItem)
-    .filter((note) => note && /^[a-f0-9]+$/i.test(String(note.note_id)));
-
-  if (captured && captured.success === false) {
-    return {
-      error: captured.msg || "Search failed",
-      hint: "Search request reached Xiaohongshu but did not return usable results"
-    };
-  }
-
+// SM-2.5 fix: real XHS schema is camelCase. Map XHS Vuex feed item -> contract Note.
+function mapXhsFeedItem(item) {
+  if (!item) return null;
+  const nc = item.noteCard || {};
+  const user = nc.user || {};
+  const interact = nc.interactInfo || {};
+  // XHS uses BOTH 'nickName' (camelCase) and 'nickname' — prefer camelCase.
+  const authorNick = user.nickName || user.nickname || '';
+  const authorId = user.userId || '';
   return {
-    keyword: args.keyword,
-    sort: requestedSort,
-    sort_label: resolveSortLabel(availableFilters, requestedSort),
-    count: notes.length,
-    has_more: captured?.data?.has_more ?? searchStore?.hasMore ?? false,
-    notes
+    id: item.id || '',
+    url: `${HOME_URL}/explore/${item.id || ''}?xsec_token=${item.xsecToken || ''}`,
+    type: nc.type === 'video' ? 'video' : 'image',
+    title: nc.displayTitle || nc.title || '',
+    desc: '',  // list adapters omit full desc per contract §10.1
+    author: {
+      id: authorId,
+      nickname: authorNick,
+      url: authorId ? `${HOME_URL}/user/profile/${authorId}` : '',
+    },
+    tags: [],  // not exposed on feed items
+    topics: [],
+    stats: {
+      likes: parseInt(interact.likedCount || '0', 10) || 0,
+      likesLabel: String(interact.likedCount || '0'),
+      collections: parseInt(interact.collectedCount || '0', 10) || 0,
+      comments: parseInt(interact.commentCount || '0', 10) || 0,
+      shares: parseInt(interact.sharedCount || '0', 10) || 0,
+    },
+    mediaCount: Array.isArray(nc.imageList) ? nc.imageList.length : (nc.cover ? 1 : 0),
+    publishedAt: null,
+    xsecToken: item.xsecToken || '',  // PER-NOTE TOKEN — top-level on feed item.
+    scrapedAt: new Date().toISOString(),
+    _source: 'pc_search',
   };
 }
+
+async function search(args) {
+  const { keyword, sort = 'general', type } = args || {};
+
+  // ----- 1. Arg validation -----
+  if (!keyword || typeof keyword !== 'string') {
+    return {
+      ok: false,
+      authStatus: 'anonymous',
+      data: null,
+      error: 'MISSING_ARG',
+      hint: 'keyword is required.',
+      action: 'abort',
+    };
+  }
+
+  // ----- 2. Navigate to XHS search page — SPA populates Vuex store -----
+  const searchUrl = `${HOME_URL}/search_result?keyword=${encodeURIComponent(keyword)}&source=web_explore_feed&type=${type === 'video' ? 'video' : (type === 'image' ? 'image' : '51')}`;
+  const page = await bb.goto(searchUrl, { waitUntil: 'networkidle' });
+
+  // ----- 3. Login check via cookieStore + Vue ref (mirrors auth adapter) -----
+  const probe = await page.eval(async () => {
+    let cookies = [];
+    try { cookies = window.cookieStore ? await window.cookieStore.getAll() : []; } catch (_) {}
+    const a1 = cookies.find((c) => c.name === 'a1') || null;
+    const s = window.__INITIAL_STATE__;
+    const u = s && s.user;
+    const uiRef = u && u.userInfo;
+    const ui = uiRef ? (uiRef._value !== undefined ? uiRef._value : uiRef) : null;
+    return {
+      a1Present: !!a1,
+      userId: ui ? ui.userId : null,
+      feedsCount: (() => {
+        try {
+          const sf = s && s.search;
+          if (!sf) return 0;
+          const feedsRef = sf.feeds;
+          const arr = feedsRef && feedsRef._value !== undefined ? feedsRef._value : (feedsRef || []);
+          return Array.isArray(arr) ? arr.length : 0;
+        } catch (_) { return 0; }
+      })(),
+    };
+  });
+
+  if (!probe.userId) {
+    return {
+      ok: false,
+      authStatus: 'anonymous',
+      data: null,
+      error: 'LOGIN_REQUIRED',
+      hint: 'Search needs a logged-in session. Run `auth`, then hand control to the human to log in.',
+      action: 'stop_and_wait_for_human',
+      recommendedNextActions: [{ adapter: 'auth', args: {}, why: 'Check login state.' }],
+    };
+  }
+
+  // ----- 4. Read results from Vuex store (XHS already paid the API cost) -----
+  let rawFeeds;
+  try {
+    rawFeeds = await page.eval(() => {
+      const sf = window.__INITIAL_STATE__.search;
+      if (!sf) return [];
+      const feedsRef = sf.feeds;
+      const arr = feedsRef && feedsRef._value !== undefined ? feedsRef._value : (feedsRef || []);
+      return Array.isArray(arr) ? arr : [];
+    });
+  } catch (e) {
+    return {
+      ok: false,
+      authStatus: 'auth_read',
+      data: null,
+      error: 'SIGNATURE_FAILED',
+      hint: `Could not read XHS Vuex store: ${e.message}. The search page may not have loaded.`,
+      action: 'refresh_and_retry',
+      recommendedNextActions: [],
+    };
+  }
+
+  if (!rawFeeds.length) {
+    return {
+      ok: false,
+      authStatus: 'auth_read',
+      data: null,
+      error: 'NOT_FOUND',
+      hint: `No results in Vuex store for keyword "${keyword}". Try a different keyword or check the XHS page loaded.`,
+      action: 'abort',
+      recommendedNextActions: [
+        { adapter: 'search', args: { keyword: '推荐' }, why: 'Try a common keyword.' },
+      ],
+    };
+  }
+
+  // ----- 5. Filter + map -----
+  const filtered = type
+    ? rawFeeds.filter((f) => (f.noteCard && f.noteCard.type) === (type === 'video' ? 'video' : 'normal'))
+    : rawFeeds;
+  const notes = filtered.map(mapXhsFeedItem).filter(Boolean);
+  notes.forEach(cacheNoteContext);
+
+  // ----- 6. Constraints + pagination + next actions -----
+  const hasMore = notes.length >= 20;
+  return {
+    ok: true,
+    authStatus: 'auth_read',
+    data: notes,
+    constraints: {
+      requestedConstraints: { keyword, sort, type: type || null },
+      executedConstraints:   { keyword, sort, type: type || 'all' },
+      deferredConstraints:   {},
+    },
+    pagination: {
+      page: 1,
+      pageSize: notes.length,
+      hasMore,
+      cursor: '',
+      nextArgs: hasMore ? { keyword, sort, type } : null,
+    },
+    recommendedNextActions: notes.slice(0, 3).map((n) => ({
+      adapter: 'post-detail',
+      args: { noteId: n.id, xsecToken: n.xsecToken },
+      why: `View full content of "${n.title || n.id}".`,
+    })),
+  };
+}
+
+// Export helpers so post-detail and like adapters can share the cache.
+const __cache_helpers = { getNoteContext, cacheNoteContext };

@@ -1,247 +1,59 @@
-# bb-sites
+# bb-sites — ma-browser 社区适配器仓库
 
-Community site adapters for [bb-browser](https://github.com/epiral/bb-browser) — turning websites into CLI commands.
+本仓库收录由社区作者独立维护的 ma-browser site 适配器。每个适配器封装一个站点的特定调用能力(查询、读取、自动化操作),供 ma-browser 用户在本地通过 CDP 在自己真实浏览器中执行。
 
-Each site adapter is a JS function that runs inside your browser via `bb-browser eval`. The browser is already logged in — no API keys, no cookie extraction, no anti-bot bypass.
+## ⚠️ 重要声明
 
-[English](README.md) · [中文](README.zh-CN.md)
+- **ma-browser 是本地自动化工具**,不运营数据服务、不聚合数据、不做内容缓存、不提供云端 relay。
+- **本仓库的适配器由各自作者独立维护**,与 ma-browser 工具项目无从属关系。ma-browser **不为**本仓库任何适配器的行为背书,不承担连带责任。
+- 适配器在用户自己真实浏览器、用用户自己登录态执行 —— 调用主体是用户自己。但**用户对站点服务条款(ToS)的承诺仍然有效**。
 
-> **102 adapters** across **36 platforms** — and growing.
+## 使用者责任
 
-## Quick Start
+使用任何适配器前,你需自行:
 
-```bash
-bb-browser site update                     # install/update site adapters
-bb-browser site list                       # list available commands
-bb-browser site reddit/me                  # run a command
-bb-browser site reddit/thread <url>        # run with args
-```
+- 阅读并遵守**目标站点的服务条款(ToS)与 robots 协议**
+- **不**用于反爬、验证码绕过、风控绕过、IP 限速绕过
+- **不**大规模爬取、转售或用于商业化替代服务
+- **不**抓取用户关系链 / 私信 / 其他用户个人信息(PII)用于再分发
+- **不**违反所在司法管辖区的法律,包括但不限于中国《反不正当竞争法》《数据安全法》《个人信息保护法》
 
-## Available Adapters
+> 你对所使用适配器的合规性、数据合法性负**全部责任**。
 
-### 🔍 Search Engines
+## 适配器作者责任
 
-| Platform | Command | Description |
-|----------|---------|-------------|
-| Google | `google/search` | Google search |
-| Baidu | `baidu/search` | Baidu search |
-| Bing | `bing/search` | Bing search |
-| DuckDuckGo | `duckduckgo/search` | DuckDuckGo search (HTML lite) |
-| Sogou | `sogou/weixin` | Sogou WeChat article search |
+提交 PR 即表示:
 
-### 📰 News & Media
+- 你已阅读目标站点 ToS,并认为该适配器**不违反**其禁止性条款
+- 你已在适配器文件头部加 `@disclaimer` 声明
+- 你理解:适配器由你独立维护,ma-browser 不为其行为背书
 
-| Platform | Command | Description |
-|----------|---------|-------------|
-| BBC | `bbc/news` | BBC News headlines (RSS) or search |
-| Reuters | `reuters/search` | Reuters news search |
-| Toutiao | `toutiao/search`, `toutiao/hot` | Toutiao (今日头条) search & trending |
-| Eastmoney | `eastmoney/news` | Eastmoney (东方财富) financial news |
+详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
-### 💬 Social Media
+## 适配器 @meta 字段
 
-| Platform | Commands | Description |
-|----------|----------|-------------|
-| Twitter/X | `twitter/user`, `twitter/thread`, `twitter/search`, `twitter/tweets`, `twitter/notifications` | User profile, tweet threads, search, timeline, notifications |
-| Reddit | `reddit/me`, `reddit/posts`, `reddit/thread`, `reddit/context` | User info, posts, discussion trees, comment chains |
-| Weibo | `weibo/me`, `weibo/hot`, `weibo/feed`, `weibo/user`, `weibo/user_posts`, `weibo/post`, `weibo/comments` | Full Weibo (微博) support — profile, trending, timeline, posts, comments |
-| Mobile Weibo | `m_weibo/me`, `m_weibo/hot`, `m_weibo/feed`, `m_weibo/search`, `m_weibo/user`, `m_weibo/user_posts`, `m_weibo/comments` | Mobile-optimized Weibo (微博手机版) — resilient JSON APIs |
-| Hupu | `hupu/hot` | Hupu (虎扑) hot posts |
+每个适配器文件头部需含 `/* @meta { ... } */` JSON 块,字段:
 
-### 💻 Tech & Dev
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `name` | ✅ | 适配器 ID,格式 `平台/命令`(如 `twitter/tweets`) |
+| `title` | ✅ | 人类可读功能标题(如"查看用户推文动态") |
+| `description` | ✅ | 功能描述 |
+| `domain` | ✅ | 目标站点域名 |
+| `category` | ✅ | 分类:`社交`/`电商`/`出行`/`影视`/`医药`/`工具` |
+| `risk` | ✅ | 风险等级:`low`/`medium`/`high` |
+| `readOnly` | ✅ | 是否只读(`true` 只查询;`false` 含写入/操作) |
+| `prerequisites` | 推荐 | 使用前提(如"需先登录 x.com") |
+| `args` | 推荐 | 参数定义 |
+| `example` | 推荐 | 示例命令 |
+| `capabilities` | 可选 | 能力标记 |
 
-| Platform | Commands | Description |
-|----------|----------|-------------|
-| GitHub | `github/me`, `github/repo`, `github/issues`, `github/issue-create`, `github/pr-create`, `github/fork` | User info, repos, issues, PRs, forks |
-| Hacker News | `hackernews/top`, `hackernews/thread` | Top stories, post + comment tree |
-| Stack Overflow | `stackoverflow/search` | Search questions |
-| CSDN | `csdn/search` | CSDN tech article search |
-| cnblogs | `cnblogs/search` | cnblogs (博客园) tech article search |
-| npm | `npm/search` | Search npm packages |
-| PyPI | `pypi/search`, `pypi/package` | Search & get Python package details |
-| arXiv | `arxiv/search` | Search academic papers |
-| Dev.to | `devto/search` | Search Dev.to articles |
-| V2EX | `v2ex/hot`, `v2ex/latest`, `v2ex/topic` | Hot/latest topics, topic detail + replies |
+风险等级参考:
 
-### 🎬 Entertainment
+- 🟢 `low`:公开数据、只读、不替代核心服务(如商品搜索、车次查询)
+- 🟡 `medium`:需登录、用户自己的数据、含写入操作(如订单查询、加购)
+- 🔴 `high`:社交平台、实时数据、关系链、可能构成实质性替代(如社交动态、关注列表)—— **强免责 + 运行前确认**
 
-| Platform | Commands | Description |
-|----------|----------|-------------|
-| YouTube | `youtube/search`, `youtube/video`, `youtube/comments`, `youtube/channel`, `youtube/feed`, `youtube/transcript` | Search, video details, comments, channels, feed, transcripts |
-| Bilibili | `bilibili/me`, `bilibili/popular`, `bilibili/ranking`, `bilibili/search`, `bilibili/video`, `bilibili/comments`, `bilibili/feed`, `bilibili/history`, `bilibili/trending` | Full B站 support — 9 adapters |
-| IMDb | `imdb/search` | IMDb movie search |
-| Genius | `genius/search` | Song/lyrics search |
-| Douban | `douban/search`, `douban/movie`, `douban/movie-hot`, `douban/movie-top`, `douban/top250`, `douban/comments` | Douban (豆瓣) movies — search, details, rankings, Top 250, reviews |
-| Qidian | `qidian/search` | Qidian (起点中文网) novel search |
+## License
 
-### 💼 Jobs & Career
-
-| Platform | Commands | Description |
-|----------|----------|-------------|
-| BOSS Zhipin | `boss/search`, `boss/detail` | BOSS直聘 job search & JD details |
-| LinkedIn | `linkedin/profile`, `linkedin/search` | LinkedIn profile & post search |
-
-### 💰 Finance
-
-| Platform | Commands | Description |
-|----------|----------|-------------|
-| Eastmoney | `eastmoney/stock`, `eastmoney/news` | 东方财富 stock quotes & financial news |
-| Yahoo Finance | `yahoo-finance/quote` | Stock quotes (AAPL, TSLA, etc.) |
-
-### 📱 Digital & Products
-
-| Platform | Command | Description |
-|----------|---------|-------------|
-| GSMArena | `gsmarena/search` | Phone specs search |
-| Product Hunt | `producthunt/today` | Today's top products |
-
-### 📚 Knowledge & Reference
-
-| Platform | Commands | Description |
-|----------|----------|-------------|
-| Wikipedia | `wikipedia/search`, `wikipedia/summary` | Search & page summaries |
-| Zhihu | `zhihu/me`, `zhihu/hot`, `zhihu/question`, `zhihu/search` | 知乎 — user info, trending, Q&A, search |
-| Open Library | `openlibrary/search` | Book search |
-
-### 🌐 Lifestyle & Travel
-
-| Platform | Command | Description |
-|----------|---------|-------------|
-| Youdao | `youdao/translate` | 有道翻译 — translation & dictionary |
-| Ctrip | `ctrip/search` | 携程 — destination & attraction search |
-
-### 🗨️ Social Apps
-
-| Platform | Commands | Description |
-|----------|----------|-------------|
-| Jike | `jike/feed`, `jike/search` | 即刻 — recommended feed & search |
-| Xiaohongshu | `xiaohongshu/me`, `xiaohongshu/feed`, `xiaohongshu/search`, `xiaohongshu/note`, `xiaohongshu/comments`, `xiaohongshu/user_posts` | Profile, feed, search, note details, comments, and user posts |
-
-> Xiaohongshu adapters now use a mix of current Pinia store state, in-page routing, and SSR state parsing. This avoids relying on stale XHR paths that no longer fire consistently on the live site.
-
-## Usage Examples
-
-```bash
-# Search the web
-bb-browser site google/search "bb-browser"
-bb-browser site duckduckgo/search "Claude Code"
-
-# Social media
-bb-browser site twitter/search "claude code"
-bb-browser site twitter/tweets plantegg
-bb-browser site reddit/thread https://reddit.com/r/programming/comments/...
-bb-browser site weibo/hot
-
-# Tech research
-bb-browser site github/repo epiral/bb-browser
-bb-browser site hackernews/top 10
-bb-browser site stackoverflow/search "python async await"
-bb-browser site arxiv/search "large language model"
-bb-browser site npm/search "react state management"
-
-# Entertainment
-bb-browser site youtube/transcript dQw4w9WgXcQ
-bb-browser site bilibili/search 编程
-bb-browser site douban/top250
-
-# Finance
-bb-browser site yahoo-finance/quote AAPL
-bb-browser site eastmoney/stock 贵州茅台
-
-# Jobs
-bb-browser site boss/search "AI agent"
-bb-browser site linkedin/search "AI agent"
-
-# Translate
-bb-browser site youdao/translate hello
-```
-
-## Xiaohongshu Notes
-
-Open a logged-in `https://www.xiaohongshu.com` tab before running these commands.
-
-- `xiaohongshu/me` reads the current user store instead of assuming `/user/me` will always fire.
-- `xiaohongshu/feed` reads the live home feed store and caches `note_id -> xsec_token` pairs for follow-up commands.
-- `xiaohongshu/search` navigates to the real search route, waits for the current `search/notes` response, and supports the site's native sort options such as `latest`, `likes`, `comments`, and `collects`.
-- `xiaohongshu/note` and `xiaohongshu/comments` need a valid `xsec_token`. Pass a full note URL, or call `feed`, `search`, or `user_posts` first so the current browser session has the token cached.
-- `xiaohongshu/user_posts` parses the profile page SSR state instead of depending on old request assumptions.
-
-Typical validation flow:
-
-```bash
-bb-browser site xiaohongshu/me
-bb-browser site xiaohongshu/feed
-bb-browser site xiaohongshu/search "穿搭"
-bb-browser site xiaohongshu/note 6932814d000000001e034e67
-bb-browser site xiaohongshu/comments 6932814d000000001e034e67
-bb-browser site xiaohongshu/user_posts 67c99deb00000000070013e9
-```
-
-## Writing a Site Adapter
-
-Run `bb-browser guide` for the full development workflow, or read [SKILL.md](SKILL.md).
-
-```javascript
-/* @meta
-{
-  "name": "platform/command",
-  "description": "What this adapter does",
-  "domain": "www.example.com",
-  "args": {
-    "query": {"required": true, "description": "Search query"}
-  },
-  "readOnly": true,
-  "example": "bb-browser site platform/command value1"
-}
-*/
-
-async function(args) {
-  if (!args.query) return {error: 'Missing argument: query'};
-  const resp = await fetch('/api/search?q=' + encodeURIComponent(args.query), {credentials: 'include'});
-  if (!resp.ok) return {error: 'HTTP ' + resp.status, hint: 'Not logged in?'};
-  return await resp.json();
-}
-```
-
-## Contributing
-
-```bash
-# Option A: with gh CLI
-gh repo fork epiral/bb-sites --clone
-cd bb-sites && git checkout -b feat-mysite
-# add adapter files
-git push -u origin feat-mysite
-gh pr create
-
-# Option B: with bb-browser (no gh needed)
-bb-browser site github/fork epiral/bb-sites
-git clone https://github.com/YOUR_USER/bb-sites && cd bb-sites
-git checkout -b feat-mysite
-# add adapter files
-git push -u origin feat-mysite
-bb-browser site github/pr-create epiral/bb-sites --title "feat(mysite): add adapters" --head "YOUR_USER:feat-mysite"
-```
-
-## Private Adapters
-
-Put private adapters in `~/.bb-browser/sites/`. They override community adapters with the same name.
-
-```
-~/.bb-browser/
-├── sites/          # Your private adapters (priority)
-│   └── internal/
-│       └── deploy.js
-└── bb-sites/       # This repo (bb-browser site update)
-    ├── reddit/
-    ├── twitter/
-    ├── github/
-    ├── youtube/
-    ├── bilibili/
-    ├── zhihu/
-    ├── weibo/
-    ├── douban/
-    ├── xiaohongshu/
-    ├── google/
-    ├── ...          # 35 platform directories
-    └── qidian/
-```
+本仓库适配器代码采用 MIT 协议。MIT 仅是版权许可,**不豁免合规责任** —— 使用者仍需自行遵守目标站点 ToS 与适用法律。
